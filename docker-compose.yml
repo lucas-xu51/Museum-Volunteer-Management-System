@@ -1,0 +1,50 @@
+
+services:
+  # PostgreSQL数据库服务
+  postgres:
+    image: postgres:15
+    container_name: museum-volunteer-db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - museum-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Next.js应用服务
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: museum-volunteer-web
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?schema=public
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - museum-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate dev --name init && npm run dev"
+
+networks:
+  museum-network:
+    driver: bridge
+
+volumes:
+  postgres-data:

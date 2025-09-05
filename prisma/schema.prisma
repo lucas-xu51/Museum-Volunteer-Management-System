@@ -1,0 +1,304 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 枚举（已修复：无显式赋值）
+enum UserRole {
+  ADMIN
+  UNI_ADMIN
+  TEEN_VOLUNTEER
+  SOCIAL_VOLUNTEER
+  UNI_VOLUNTEER
+}
+
+enum VolunteerType {
+  TEEN
+  SOCIAL
+  UNIVERSITY
+}
+
+enum ApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ReservationStatus {
+  RESERVED
+  CANCELLED
+  COMPLETED
+}
+
+enum CheckInStatus {
+  CHECKED_IN
+  CHECKED_OUT
+}
+
+enum GenderRestriction {
+  MALE        // 仅男性
+  FEMALE      // 仅女性
+  UNRESTRICTED // 无限制（默认）
+}
+
+// 1. User 模型：补充与 VolunteerApplication.user 对应的反向关联
+model User {
+  id            String    @id @default(uuid())
+  role          UserRole
+  name          String    @db.VarChar(50)
+  phone         String    @unique @db.VarChar(20)
+  email         String?   @unique @db.VarChar(100)
+  passwordHash  String    @db.VarChar(255)
+  avatarUrl     String?   @db.VarChar(255)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessionToken  String?   @unique // 可选字段，登录时生成，登出时清空
+
+  // 关联修正：
+  // ① 与 VolunteerApplication.applicant 对应的反向关联（申请记录的申请人）
+  appliedApplications  VolunteerApplication[] @relation("ApplicationApplicant")
+  // ② 与 VolunteerApplication.reviewer 对应的反向关联（审核人）
+  reviewedApplications  VolunteerApplication[] @relation("ApplicationReviewer")
+  // ③ 新增：与 VolunteerApplication.user 对应的反向关联（审核通过后关联的用户）
+  approvedApplications  VolunteerApplication[] @relation("ApprovedUser")
+  // 新增：与 Activity.creator 对应的反向关联
+  createdActivities Activity[] @relation("ActivityCreator")
+  activityReservations ActivityReservation[] @relation("VolunteerActivityReserve")
+
+  // 其他关联字段保持不变...
+  reservations  VolunteerReservation[] @relation("ReservationVolunteer")
+  checkIns      CheckInRecord[]        @relation("CheckInVolunteer")
+  checkedIns    CheckInRecord[]        @relation("CheckInChecker")
+  updatedMuseums MuseumInfo[]          @relation("MuseumUpdater")
+  createdSchedules DailySchedule[]     @relation("ScheduleCreator")
+  volunteerHour VolunteerHour?
+
+  @@index([role])
+  @@index([phone])
+}
+
+// 2. VolunteerApplication 模型：完善关联定义
+model VolunteerApplication {
+  id            String            @id @default(uuid())
+  // 申请人信息（临时存储）
+  applicantName String            @db.VarChar(50)
+  applicantPhone String           @unique @db.VarChar(20)
+  applicantEmail String?          @db.VarChar(100)
+  applicantAge Int                // 申请人年龄
+  applicantGender String          @db.VarChar(10)
+  
+  applyType     VolunteerType
+  status        ApplicationStatus @default(PENDING)
+  reviewBy      String?
+  reviewNote    String?   @db.Text
+  applyTime     DateTime  @default(now())
+  reviewTime    DateTime?
+
+  // 关联修正：
+  // ① 申请人关联（冗余字段，用于区分“提交申请的人”和“通过后创建的用户”）
+  applicant      User?             @relation("ApplicationApplicant", fields: [applicantId], references: [id])
+  applicantId    String?           // 可选，若申请时还没有用户（首次申请）则为 null
+  
+  // ② 审核人关联
+  reviewer       User?             @relation("ApplicationReviewer", fields: [reviewBy], references: [id])
+  
+  // ③ 审核通过后关联的用户（你的核心需求）
+  user           User?             @relation("ApprovedUser", fields: [userId], references: [id])
+  userId         String?           // 审核通过后才填充
+
+  @@index([status, applyType])
+  @@index([userId])
+  @@index([applicantId])
+}
+
+// 博物馆信息表：关联名称与 User 对应
+model MuseumInfo {
+  id            String    @id @default(uuid())
+  name          String    @db.VarChar(100)
+  address       String    @db.VarChar(255)
+  openingHours  String    @db.VarChar(100)
+  contactPhone  String    @db.VarChar(20)
+  description   String?   @db.Text
+  updatedBy     String
+  updatedAt     DateTime  @default(now()) @updatedAt
+
+  updater       User      @relation("MuseumUpdater", fields: [updatedBy], references: [id]) // 对应 User.updatedMuseums
+
+  @@unique([name])
+}
+
+// 志愿者岗位表：无 User 关联，无需修改
+model VolunteerPosition {
+  id                  String            @id @default(uuid())
+  name                String            @db.VarChar(50)  // 岗位名称（如“保安”“引导员”）
+  description         String?           @db.Text         // 岗位描述
+  maxNum              Int               // 该岗位最大志愿者数量
+  isActive            Boolean           @default(true)   // 岗位是否启用
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  // 新增：岗位限制字段
+  allowedVolunteerTypes VolunteerType[]  // 允许申请的志愿者类型（如[TEEN, UNIVERSITY]）
+  genderRestriction    GenderRestriction @default(UNRESTRICTED) // 性别限制
+  minAge               Int?              // 最小年龄（null表示无限制）
+  maxAge               Int?              // 最大年龄（null表示无限制）
+
+  // 原有关联保持不变
+  dailySchedules       DailySchedule[]
+  // 新增：与 ActivityPositionConfig.position 对应的反向关联
+  activityConfigs     ActivityPositionConfig[]
+
+  // 索引优化：便于按“是否启用”“志愿者类型”筛选岗位
+  @@index([isActive])
+  @@index([allowedVolunteerTypes])
+}
+
+// 每日排班表：关联名称与 User 对应
+// 每日排班表：关联名称与 User 对应
+model DailySchedule {
+  id            String    @id @default(uuid())
+  positionId    String
+  date          DateTime  @db.Date
+  requiredNum   Int
+  startTime     String    @db.VarChar(20)
+  endTime       String    @db.VarChar(20)
+  qrcodeUrl     String?   @db.VarChar(255)
+  link          String?   @db.VarChar(255)
+  createdAtBy   String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  position      VolunteerPosition @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  creator       User      @relation("ScheduleCreator", fields: [createdAtBy], references: [id]) // 对应 User.createdSchedules
+  reservations  VolunteerReservation[]
+
+  @@index([date, positionId])
+  @@unique([positionId, date])
+}
+
+// 志愿者预约表：关联名称与 User 对应
+model VolunteerReservation {
+  id            String            @id @default(uuid())
+  userId        String
+  scheduleId    String
+  status        ReservationStatus
+  reserveTime   DateTime  @default(now())
+  cancelTime    DateTime?
+
+  volunteer     User      @relation("ReservationVolunteer", fields: [userId], references: [id], onDelete: Cascade) // 对应 User.reservations
+  schedule      DailySchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  @@index([userId, scheduleId])
+  @@index([scheduleId, status])
+  @@unique([userId, scheduleId])
+}
+
+// 打卡记录表：关联名称与 User 对应
+model CheckInRecord {
+  id                    String            @id @default(uuid())
+  userId                String
+
+  // 2. 保留并强化与ActivityReservation的关联
+  activityReservationId String            @unique // 确保一个报名记录只能对应一条打卡
+  activityReservation   ActivityReservation @relation(fields: [activityReservationId], references: [id], onDelete: SetNull)
+
+  checkInTime           DateTime
+  checkOutTime          DateTime?
+  checkedBy             String
+  status                CheckInStatus
+
+  volunteer             User              @relation("CheckInVolunteer", fields: [userId], references: [id], onDelete: Cascade)
+  checker               User              @relation("CheckInChecker", fields: [checkedBy], references: [id])
+
+  @@index([userId])
+  @@index([activityReservationId]) // 新增：按报名记录查询打卡
+  @@index([status])
+  @@unique([userId, activityReservationId])
+}
+
+// 志愿者时长表：无额外 User 关联，无需修改
+model VolunteerHour {
+  id            String    @id @default(uuid())
+  userId        String    @unique
+  totalHours    Float     @default(0.0)
+  lastUpdateTime DateTime  @default(now())
+
+  volunteer     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([totalHours])
+}
+
+model ActivityPositionConfig {
+  id           String            @id @default(uuid())
+  activityId   String
+  positionId   String
+  count        Int               // 该岗位在活动中的需求人数
+  createdAt    DateTime          @default(now())
+
+  // 关联：对应活动和岗位
+  activity     Activity          @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  position     VolunteerPosition @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  reservations ActivityReservation[]
+
+  // 唯一约束：一个活动中同一个岗位只能有一条配置
+  @@unique([activityId, positionId])
+  @@index([activityId])
+  @@index([positionId])
+}
+
+model Activity {
+  id           String                    @id @default(uuid())
+  name         String                    @db.VarChar(255) // 新增：活动名称（如"讲座"、"宣传活动"）
+  date         DateTime                  @db.Date // 活动日期
+  startTime    String                    @db.VarChar(20) // 开始时间（HH:00）
+  endTime      String                    @db.VarChar(20) // 结束时间（HH:00）
+  location     String                    @db.VarChar(255) // 活动地点
+  description  String?                   @db.Text // 活动详细描述（可选）
+  createdAtBy  String // 活动创建者（管理员ID，关联User）
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  // 关联：1个活动对应多个岗位配置
+  positionConfigs ActivityPositionConfig[]
+  reservations ActivityReservation[]
+  // 关联：活动创建者（管理员）
+  creator       User                     @relation("ActivityCreator", fields: [createdAtBy], references: [id])
+
+  // 索引优化：按日期查询活动（核心查询场景）
+  @@index([date])
+  // 唯一约束：同一日期+同一时间段+同一地点不能重复创建活动
+  @@unique([date, startTime, endTime, location])
+}
+
+
+// 志愿者活动报名表（记录每小时的报名信息）
+model ActivityReservation {
+  id                String              @id @default(uuid())
+  userId            String              // 报名的志愿者ID
+  activityId        String              // 活动ID
+  activityPositionId String             // 活动岗位配置ID（关联ActivityPositionConfig）
+  timeSlot          String              // 报名的小时段（如"09:00-10:00"）
+  status            ReservationStatus    @default(RESERVED) // 报名状态
+  reserveTime       DateTime            @default(now())    // 报名时间
+  cancelTime        DateTime?           // 取消时间（可选）
+
+  // 关联关系
+  volunteer         User                @relation("VolunteerActivityReserve", fields: [userId], references: [id], onDelete: Cascade)
+  activity          Activity            @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  positionConfig    ActivityPositionConfig @relation(fields: [activityPositionId], references: [id], onDelete: Cascade)
+  checkInRecord     CheckInRecord?
+
+  // 唯一约束：同一志愿者不能重复报名同一活动的同一时间段+同一岗位
+  @@unique([userId, activityId, timeSlot, activityPositionId])
+  // 索引优化：按活动、时间段、岗位筛选报名情况
+  @@index([activityId, timeSlot])
+  @@index([activityPositionId, timeSlot])
+  @@index([userId, status])
+}
